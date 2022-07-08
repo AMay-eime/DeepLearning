@@ -5,7 +5,7 @@ from torch import *
 
 class StockPredictNet(nn.Module):
     def __init__(self, attnHead, hiddn, num_layers = 2,) -> None:
-        
+        pass
 
 if __name__ == "__main__":
     arg = sys.argv
