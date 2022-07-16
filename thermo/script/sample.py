@@ -1,4 +1,8 @@
+from cProfile import label
+from email import utils
+from random import random
 from turtle import forward
+from typing import Tuple
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 import numpy as np
@@ -7,13 +11,22 @@ import os
 import sys
 import torch
 import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader
 import glob
+import math
+import random
 
 #コンフィグ
 d_waves = 8
 heads = 8
 d_wave_width = 200
 encoder_layers = 6
+epochs = 8
+batch_size = 16
+restart_epoch = -1
+
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, dropout=0.1, max_len=5000):
@@ -34,6 +47,7 @@ class PositionalEncoding(nn.Module):
 
 class ScratchNet(nn.Module):
     def __init__(self):
+        super(ScratchNet, self).__init__()
         self.pos_encoder = PositionalEncoding(d_waves)
         encoder_layer = nn.TransformerEncoderLayer(d_waves, heads, batch_first=True)
         self.transformerEncoder = nn.TransformerEncoder(encoder_layer, encoder_layers)
@@ -41,7 +55,7 @@ class ScratchNet(nn.Module):
         self.sequence = nn.Sequential(\
             nn.Linear(d_waves * (d_wave_width * 2 + 1), d_waves * d_wave_width),\
             nn.ReLU(),\
-            nn.Linear(d_waves * (d_wave_width * 2 + 1), d_waves * d_wave_width),\
+            nn.Linear(d_waves * d_wave_width, 2),\
             nn.ReLU())
         self.softmax = nn.Softmax(dim=1)
 
@@ -53,25 +67,33 @@ class ScratchNet(nn.Module):
         out = self.softmax(x)
         return out
 
-def data_make(self, filename:str):
-    meta_df = pd.read_csv("../data/modified_meta.csv", encoding= "UTF-8")
-    scratch_pos = meta_df.loc[filename, "scratchpos_all"]
+def data_make(filename:str):
+    meta_df = pd.read_csv("../data/modified_meta.csv", encoding= "UTF-8", sep = ",", index_col=0)
+    scratch_pos:str = meta_df.at[filename, "scratchpos_all"]
+    scratch_pos = scratch_pos.replace("[", "")
+    scratch_pos = scratch_pos.replace("]", "")
+    if(scratch_pos == ""):
+        scratch_pos = []
+    else:
+        scratch_pos = scratch_pos.split(", ")
+    #print(scratch_pos)
     filepath = "../data/train/" + filename
-    df = pd.read_csv(filepath, encoding= "UTF-8")
+    df = pd.read_csv(filepath, encoding= "UTF-8", sep= ",")
     length = len(df)
     data = []
     label = []
     for i in range(d_wave_width, length - 1 - d_wave_width):
-        partial_df = df.iloc[i-d_wave_width, i+d_wave_width+1].to_numpy().transpose()
-        data.append(torch.tensor(partial_df))
+        partial_df = df[i-d_wave_width:i+d_wave_width+1].to_numpy().astype(np.float32) #(401,7)
+        data.append(partial_df)
         before_points = 0
         for point in scratch_pos:
-            if(point < i):
+            if(int(point) < i):
                 before_points += 1
         if(before_points //2 == 1):
-            label.append(torch.tensor([1, 0]))
+            label.append(np.array([1., 0.]).astype(np.float32))
         else:
-            label.append(torch.tensor([0, 1]))
+            label.append(np.array([0., 1.]).astype(np.float32))
+    #print(f"data length = {len(data)}")
     return data, label
 
 class DataSet(torch.utils.data.Dataset):
@@ -80,22 +102,63 @@ class DataSet(torch.utils.data.Dataset):
         self.label = []
         super().__init__()
 
-    def __getitem__(self, idx):
+    def add_items(self, datum, label):
+        self.data.extend(datum)
+        self.label.extend(label)
+
+    def __getitem__(self, idx) -> Tuple[torch.Tensor, torch.Tensor]:
         out_data = self.data[idx]
         out_label = self.label[idx]
-        out_data = torch.tensor(out_data)
+        out_data = torch.from_numpy(out_data)
+        out_label = torch.from_numpy(out_label)
+        out_data.to(device)
+        out_label.to(device)
         return out_data, out_label
 
-
+    def __len__(self) -> int:
+        return len(self.data)
 
 def Train():
-    files = glob.glob("../data/train/*")
+    square_loss = nn.MSELoss()
+    cross_entropy = nn.CrossEntropyLoss()
+    net = ScratchNet()
+    if restart_epoch > -1:
+        net.load_state_dict(torch.load(f"model_{restart_epoch}.pth"))
+    optimiser = optim.SGD(net.parameters(), lr=5e-4, momentum=0.9, nesterov= True)
+    
+    for i in range(epochs):
+        files = glob.glob("../data/train/*")
+        files = random.sample(files, 16)
+        train_set = DataSet()
+        for file in files:
+            file = file.split("/")[-1]
+            print(file)
+            data, label = data_make(file)
+            train_set.add_items(data, label)
+        print(f"made train set epoch_{i}")
+
+        running_loss = 0.0
+        train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
+        for j, (inputs, labels) in enumerate(train_loader, 0):
+            optimiser.zero_grad()
+
+            outputs = net(inputs)
+            loss = square_loss(outputs, labels)
+            loss.backward()
+            optimiser.step()
+            running_loss += loss.item()
+            if(j % 100 == 99):
+                print(f"[{i+1}, {j+1}] loss: {running_loss/100}")
+                running_loss = 0
+        print(f"epoch finished {i}")
+        torch.save(net.state_dict(), f"model_{i}.pth")
+    print("finishing train")
   
 if __name__ == "__main__":
     arg = sys.argv
     if arg[1] == "__train":
         #訓練の挙動を定義
-        files = glob.glob("../data/train/*")
+        Train()
     elif arg[1] == "__predict":
         #実行の挙動を定義
         pass
